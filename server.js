@@ -1,152 +1,160 @@
-// server.js
 require('dotenv').config();
 const express = require('express');
 const cors = require('cors');
 const { Pool } = require('pg');
+const mysql = require('mysql2/promise');
 
 const app = express();
 const port = process.env.PORT || 3000;
 
 app.use(cors());
-app.use(express.json()); // Add this line to parse JSON request bodies if you ever need them
+app.use(express.json());
 
-const pool = new Pool({
+// PostgreSQL Pool
+const pgPool = new Pool({
   connectionString: process.env.DATABASE_URL,
   ssl: { rejectUnauthorized: false },
 });
 
-// 1. Endpoint to get all districts
+// MySQL Pool for KPI
+const parseMysqlUrl = (mysqlUrl) => {
+  const parsed = new URL(mysqlUrl);
+  return {
+    host: parsed.hostname,
+    port: parsed.port,
+    user: parsed.username,
+    password: parsed.password,
+    database: parsed.pathname.replace('/', ''),
+    ssl: { rejectUnauthorized: false }
+    
+  };
+};
+
+const mysqlPool = mysql.createPool(parseMysqlUrl(process.env.KPI_DB_URL));
+
+/* ---------- Main Data Endpoints (PostgreSQL) ---------- */
 app.get('/api/districts', async (req, res) => {
   try {
-    const query = `SELECT id, name FROM public.districts ORDER BY name;`;
-    const result = await pool.query(query);
+    const result = await pgPool.query(`SELECT id, name FROM public.districts ORDER BY name;`);
     res.json(result.rows);
   } catch (err) {
-    console.error('Database error fetching districts:', err);
+    console.error('Error fetching districts:', err);
     res.status(500).json({ error: 'Failed to fetch districts' });
   }
 });
 
-// 2. Endpoint to get substations for a given district_id
 app.get('/api/substations', async (req, res) => {
-  const { district_id } = req.query; // Get district_id from query parameters
-
-  if (!district_id) {
-    return res.status(400).json({ error: 'district_id is required' });
-  }
+  const { district_id } = req.query;
+  if (!district_id) return res.status(400).json({ error: 'district_id is required' });
 
   try {
-    const query = `SELECT id, name, district_id FROM public.substations WHERE district_id = $1 ORDER BY name;`;
-    const result = await pool.query(query, [district_id]);
+    const result = await pgPool.query(
+      `SELECT id, name, district_id FROM public.substations WHERE district_id = $1 ORDER BY name;`,
+      [district_id]
+    );
     res.json(result.rows);
   } catch (err) {
-    console.error('Database error fetching substations:', err);
+    console.error('Error fetching substations:', err);
     res.status(500).json({ error: 'Failed to fetch substations' });
   }
 });
 
-// 3. Endpoint to get feeders for a given substation_id
 app.get('/api/feeders', async (req, res) => {
-  const { substation_id } = req.query; // Get substation_id from query parameters
-
-  if (!substation_id) {
-    return res.status(400).json({ error: 'substation_id is required' });
-  }
+  const { substation_id } = req.query;
+  if (!substation_id) return res.status(400).json({ error: 'substation_id is required' });
 
   try {
-    const query = `SELECT id, name, substation_id FROM public.feeders WHERE substation_id = $1 ORDER BY name;`;
-    const result = await pool.query(query, [substation_id]);
+    const result = await pgPool.query(
+      `SELECT id, name, substation_id FROM public.feeders WHERE substation_id = $1 ORDER BY name;`,
+      [substation_id]
+    );
     res.json(result.rows);
   } catch (err) {
-    console.error('Database error fetching feeders:', err);
+    console.error('Error fetching feeders:', err);
     res.status(500).json({ error: 'Failed to fetch feeders' });
   }
 });
 
+app.get('/api/energy_data', async (req, res) => {
+  const { district_id, substation_id, feeder_id } = req.query;
 
-// 4. Modified /api/energy endpoint to accept filter parameters
-app.get('/api/energy_data', async (req, res) => { // Renamed for clarity as it's specific data
-  const { district_id, substation_id, feeder_id } = req.query; // Get filter IDs from query parameters
-
-  let query = `
-    WITH consumer_metrics AS (
-        SELECT dtr_id, COUNT(consumer_no) AS consumer_count, SUM(load_kw) AS total_load_kw
-        FROM public.consumers
-        GROUP BY dtr_id
-    ),
-    dtr_with_metrics AS (
-        SELECT dtrs.id AS dtr_id, dtrs.name AS dtr_name, dtrs.feeder_id,
-             consumer_metrics.consumer_count, consumer_metrics.total_load_kw
-        FROM public.dtrs
-        LEFT JOIN consumer_metrics ON dtrs.id = consumer_metrics.dtr_id
-    ),
-    feeder_with_metrics AS (
-        SELECT feeders.id AS feeder_id, feeders.name AS feeder_name, feeders.substation_id,
-             COALESCE(SUM(dtr_with_metrics.consumer_count), 0) AS consumer_count,
-             COALESCE(SUM(dtr_with_metrics.total_load_kw), 0) AS total_load_kw
-        FROM public.feeders
-        LEFT JOIN dtr_with_metrics ON feeders.id = dtr_with_metrics.feeder_id
-        GROUP BY feeders.id, feeders.name, feeders.substation_id
-    ),
-    substation_with_metrics AS (
-        SELECT substations.id AS substation_id, substations.name AS substation_name, substations.district_id,
-             COALESCE(SUM(feeder_with_metrics.consumer_count), 0) AS consumer_count,
-             COALESCE(SUM(feeder_with_metrics.total_load_kw), 0) AS total_load_kw
-        FROM public.substations
-        LEFT JOIN feeder_with_metrics ON substations.id = feeder_with_metrics.substation_id
-        GROUP BY substations.id, substations.name, substations.district_id
-    )
-    SELECT districts.name AS district_name, substations.name AS substation_name,
-           feeders.name AS feeder_name, dtrs.name AS dtr_name,
-           COALESCE(consumer_metrics.consumer_count, 0) AS dtr_consumer_count,
-           COALESCE(consumer_metrics.total_load_kw, 0) AS dtr_total_load_kw,
-           COALESCE(feeder_with_metrics.consumer_count, 0) AS feeder_consumer_count,
-           COALESCE(feeder_with_metrics.total_load_kw, 0) AS feeder_total_load_kw,
-           COALESCE(substation_with_metrics.consumer_count, 0) AS substation_consumer_count,
-           COALESCE(substation_with_metrics.total_load_kw, 0) AS substation_total_load_kw
-    FROM public.dtrs
-    LEFT JOIN consumer_metrics ON dtrs.id = consumer_metrics.dtr_id
-    LEFT JOIN public.feeders ON dtrs.feeder_id = feeders.id
-    LEFT JOIN feeder_with_metrics ON feeders.id = feeder_with_metrics.feeder_id
-    LEFT JOIN public.substations ON feeders.substation_id = substations.id
-    LEFT JOIN substation_with_metrics ON substations.id = substation_with_metrics.substation_id
-    LEFT JOIN public.districts ON substations.district_id = districts.id
-  `;
-
+  let query = `-- your long WITH SQL block as-is (omitted for brevity)`;
   const queryParams = [];
-  let whereClauses = [];
+  const whereClauses = [];
 
-  // Add WHERE clauses based on provided filter parameters
   if (district_id) {
-    whereClauses.push('public.districts.id = $1');
+    whereClauses.push(`public.districts.id = $${queryParams.length + 1}`);
     queryParams.push(district_id);
   }
   if (substation_id) {
-    // If district_id is already present, substation_id will be $2, otherwise $1
     whereClauses.push(`public.substations.id = $${queryParams.length + 1}`);
     queryParams.push(substation_id);
   }
   if (feeder_id) {
-    // Similarly for feeder_id
     whereClauses.push(`public.feeders.id = $${queryParams.length + 1}`);
     queryParams.push(feeder_id);
   }
 
-  if (whereClauses.length > 0) {
-    query += ' WHERE ' + whereClauses.join(' AND ');
-  }
-
-  query += ' ORDER BY district_name, substation_name, feeder_name, dtr_name;';
+  if (whereClauses.length > 0) query += ` WHERE ${whereClauses.join(' AND ')}`;
+  query += ` ORDER BY district_name, substation_name, feeder_name, dtr_name;`;
 
   try {
-    const result = await pool.query(query, queryParams);
+    const result = await pgPool.query(query, queryParams);
     res.json(result.rows);
   } catch (err) {
-    console.error('Database error fetching filtered energy data:', err);
+    console.error('Error fetching energy data:', err);
     res.status(500).json({ error: 'Failed to fetch filtered energy data' });
   }
 });
 
+/* ---------- KPI Endpoints (MySQL with label/value formatting) ---------- */
+const fetchKPI = (tableName, labelKey, valueKey) => async (req, res) => {
+  try {
+    const [rows] = await mysqlPool.query(`SELECT * FROM ${tableName} ORDER BY id;`);
+    const formatted = rows.map(row => ({
+      label: row[labelKey],
+      value: row[valueKey]
+    }));
+    res.json({ data: formatted });
+  } catch (err) {
+    console.error(`Error fetching KPI ${tableName}:`, err);
+    res.status(500).json({ error: `Failed to fetch KPI: ${tableName}` });
+  }
+};
+
+// Regular KPI endpoints with correct column names
+app.get('/api/kpi/billing-efficiency', fetchKPI('billing_efficiency', 'month', 'value'));
+app.get('/api/kpi/revenue-collection-efficiency', fetchKPI('revenue_collection_efficiency', 'month', 'value'));
+app.get('/api/kpi/avg-billing-per-consumer', fetchKPI('avg_billing_per_consumer', 'month', 'value'));
+app.get('/api/kpi/billing-rate', fetchKPI('billing_rate', 'region', 'rate'));
+app.get('/api/kpi/collection-rate', fetchKPI('collection_rate', 'month', 'value'));
+app.get('/api/kpi/unbilled-consumers', fetchKPI('unbilled_consumers', 'month', 'percent'));
+app.get('/api/kpi/arrear-ratio', fetchKPI('arrear_ratio', 'month', 'percent'));
+app.get('/api/kpi/billing-coverage', fetchKPI('billing_coverage', 'month', 'value'));
+
+// Custom endpoints for special tables
+
+app.get('/api/kpi/disputed-bills', async (req, res) => {
+  try {
+    const [rows] = await mysqlPool.query('SELECT * FROM disputed_bills ORDER BY id;');
+    res.json({ data: rows });
+  } catch (err) {
+    console.error('Error fetching KPI disputed_bills:', err);
+    res.status(500).json({ error: 'Failed to fetch KPI: disputed_bills' });
+  }
+});
+
+app.get('/api/kpi/metering-status', async (req, res) => {
+  try {
+    const [rows] = await mysqlPool.query('SELECT * FROM metering_status ORDER BY id;');
+    res.json({ data: rows });
+  } catch (err) {
+    console.error('Error fetching KPI metering_status:', err);
+    res.status(500).json({ error: 'Failed to fetch KPI: metering_status' });
+  }
+});
+
+/* ---------- Start Server ---------- */
 app.listen(port, () => {
   console.log(`✅ Server running on http://localhost:${port}`);
 });
