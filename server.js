@@ -24,9 +24,49 @@ const parseMysqlUrl = (mysqlUrl) => {
 
 const mysqlPool = mysql.createPool(parseMysqlUrl(process.env.KPI_DB_URL));
 
+// Middleware for basic logging and CORS
+app.use((req, res, next) => {
+    console.log(`${new Date().toISOString()} - ${req.method} ${req.originalUrl}`);
+    next();
+});
+
+// --- Helper for ID validation and existence checking ---
+const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId, parentIdCol) => {
+    if (id === undefined) return null; // Not provided, not an error
+
+    // 1. Validate if it's an integer
+    if (isNaN(parseInt(id)) || String(parseInt(id)) !== String(id)) {
+        throw new Error(`Invalid ID format for ${idCol}: ${id}. Must be an integer.`);
+    }
+    const parsedId = parseInt(id);
+
+    let query = `SELECT ${nameCol} FROM ${tableName} WHERE ${idCol} = ?`;
+    const params = [parsedId];
+
+    // 2. Validate hierarchy if parentId is provided
+    if (parentId !== undefined && parentId !== null) {
+        if (isNaN(parseInt(parentId)) || String(parseInt(parentId)) !== String(parentId)) {
+            throw new Error(`Invalid parent ID format for ${parentIdCol}: ${parentId}. Must be an integer.`);
+        }
+        query += ` AND ${parentIdCol} = ?`;
+        params.push(parseInt(parentId));
+    }
+
+    const [rows] = await mysqlPool.query(query, params);
+
+    // 3. Check if ID exists and belongs to hierarchy
+    if (rows.length === 0) {
+        if (parentId !== undefined && parentId !== null) {
+            throw new Error(`Invalid ${idCol}: ${id} does not exist or does not belong to ${parentIdCol}: ${parentId}.`);
+        } else {
+            throw new Error(`Invalid ${idCol}: ${id} does not exist.`);
+        }
+    }
+    return rows[0][nameCol];
+};
+
+
 /* ---------- Master Data Endpoints (MySQL) ---------- */
-// These remain the same as the geographical tables (Circles, Divisions, etc.)
-// are distinct from the KPI tables, and this hierarchy is needed for dropdowns.
 
 app.get('/api/filters/circles', async (req, res) => {
     try {
@@ -40,9 +80,12 @@ app.get('/api/filters/circles', async (req, res) => {
 
 app.get('/api/filters/divisions', async (req, res) => {
     const { circleId } = req.query;
-    if (!circleId) return res.status(400).json({ error: 'circleId is required' });
-
     try {
+        const circleName = await validateAndGetGeoName(circleId, 'Circles', 'CircleID', 'CircleName'); // Check circleId exists
+        if (!circleName) { // Means circleId was missing or invalid
+            return res.status(400).json({ error: 'circleId is required and must be valid' });
+        }
+        
         const [rows] = await mysqlPool.query(
             `SELECT DivisionID AS id, DivisionName AS name, CircleID FROM Divisions WHERE CircleID = ? ORDER BY DivisionName;`,
             [circleId]
@@ -50,15 +93,21 @@ app.get('/api/filters/divisions', async (req, res) => {
         res.json(rows);
     } catch (err) {
         console.error('Error fetching divisions:', err);
+        if (err.message.startsWith('Invalid ID format') || err.message.startsWith('Invalid CircleID')) {
+             return res.status(400).json({ error: err.message });
+        }
         res.status(500).json({ error: 'Failed to fetch divisions' });
     }
 });
 
 app.get('/api/filters/subdivisions', async (req, res) => {
     const { divisionId } = req.query;
-    if (!divisionId) return res.status(400).json({ error: 'divisionId is required' });
-
     try {
+        const divisionName = await validateAndGetGeoName(divisionId, 'Divisions', 'DivisionID', 'DivisionName'); // Check divisionId exists
+        if (!divisionName) { // Means divisionId was missing or invalid
+            return res.status(400).json({ error: 'divisionId is required and must be valid' });
+        }
+
         const [rows] = await mysqlPool.query(
             `SELECT SubdivisionID AS id, SubdivisionName AS name, DivisionID FROM Subdivisions WHERE DivisionID = ? ORDER BY SubdivisionName;`,
             [divisionId]
@@ -66,18 +115,21 @@ app.get('/api/filters/subdivisions', async (req, res) => {
         res.json(rows);
     } catch (err) {
         console.error('Error fetching subdivisions:', err);
+        if (err.message.startsWith('Invalid ID format') || err.message.startsWith('Invalid DivisionID')) {
+            return res.status(400).json({ error: err.message });
+        }
         res.status(500).json({ error: 'Failed to fetch subdivisions' });
     }
 });
 
 app.get('/api/filters/sections', async (req, res) => {
     const { subdivisionId } = req.query;
-    if (!subdivisionId) return res.status(400).json({ error: 'subdivisionId is required' });
-
     try {
-        // Assuming we prioritize subdivision for sections.
-        // If a section can exist without a subdivision but linked to a division,
-        // you might need additional logic here (e.g., if (!subdivisionId && divisionId) ...)
+        const subdivisionName = await validateAndGetGeoName(subdivisionId, 'Subdivisions', 'SubdivisionID', 'SubdivisionName'); // Check subdivisionId exists
+        if (!subdivisionName) { // Means subdivisionId was missing or invalid
+            return res.status(400).json({ error: 'subdivisionId is required and must be valid' });
+        }
+        
         const [rows] = await mysqlPool.query(
             `SELECT SectionID AS id, SectionName AS name, SubdivisionID FROM Sections WHERE SubdivisionID = ? ORDER BY SectionName;`,
             [subdivisionId]
@@ -85,13 +137,15 @@ app.get('/api/filters/sections', async (req, res) => {
         res.json(rows);
     } catch (err) {
         console.error('Error fetching sections:', err);
+        if (err.message.startsWith('Invalid ID format') || err.message.startsWith('Invalid SubdivisionID')) {
+            return res.status(400).json({ error: err.message });
+        }
         res.status(500).json({ error: 'Failed to fetch sections' });
     }
 });
 
 app.get('/api/filters/years', async (req, res) => {
     try {
-        // Fetch distinct years from one of your KPI tables (e.g., billing_efficiency)
         const [rows] = await mysqlPool.query(`
             SELECT DISTINCT year AS year_val
             FROM billing_efficiency
@@ -105,106 +159,100 @@ app.get('/api/filters/years', async (req, res) => {
     }
 });
 
-// ... (previous code for imports, app setup, mysqlPool) ...
-
-/* ---------- Master Data Endpoints (MySQL) ---------- */
-// ... (Your /api/filters/circles, divisions, subdivisions, sections, years endpoints - these remain unchanged) ...
-
 /* ---------- KPI Endpoints (MySQL with direct filtering) ---------- */
 
-// Helper function to lookup names from IDs
-const getGeoNamesFromIds = async ({ circleId, divisionId, subdivisionId, sectionId }) => {
-    const geoNames = {};
-    try {
-        if (circleId) {
-            const [rows] = await mysqlPool.query(`SELECT CircleName FROM Circles WHERE CircleID = ?`, [circleId]);
-            if (rows.length > 0) geoNames.circleName = rows[0].CircleName;
-        }
-        if (divisionId) {
-            const [rows] = await mysqlPool.query(`SELECT DivisionName FROM Divisions WHERE DivisionID = ?`, [divisionId]);
-            if (rows.length > 0) geoNames.divisionName = rows[0].DivisionName;
-        }
-        if (subdivisionId) {
-            const [rows] = await mysqlPool.query(`SELECT SubdivisionName FROM Subdivisions WHERE SubdivisionID = ?`, [subdivisionId]);
-            if (rows.length > 0) geoNames.subdivisionName = rows[0].SubdivisionName;
-        }
-        if (sectionId) {
-            const [rows] = await mysqlPool.query(`SELECT SectionName FROM Sections WHERE SectionID = ?`, [sectionId]);
-            if (rows.length > 0) geoNames.sectionName = rows[0].SectionName;
-        }
-    } catch (error) {
-        console.error("Error looking up geographical names:", error);
-        // Depending on strictness, you might want to throw or return nulls
-        // For now, it will just proceed with whatever names it found
-    }
-    return geoNames;
-};
-
-
 const fetchKPI = (tableName, labelKey, valueKey) => async (req, res) => {
-    // Extract incoming IDs and year
     const { circleId, divisionId, subdivisionId, sectionId, year } = req.query;
 
-    // Perform ID to Name lookup
-    const { circleName, divisionName, subdivisionName, sectionName } = await getGeoNamesFromIds({
-        circleId, divisionId, subdivisionId, sectionId
-    });
+    try {
+        // --- 1. Validate REQUIRED parameters ---
+        if (!circleId) {
+            return res.status(400).json({ error: 'circleId is required for KPI data.' });
+        }
+        if (!year) {
+            return res.status(400).json({ error: 'year is required for KPI data.' });
+        }
+        if (isNaN(parseInt(year)) || String(parseInt(year)) !== String(year)) {
+            return res.status(400).json({ error: `Invalid year format: ${year}. Must be an integer.` });
+        }
 
-    const queryParams = [];
-    const whereClauses = [];
+        // --- 2. Validate IDs and Hierarchy, get names for WHERE clauses ---
+        let circleName, divisionName, subdivisionName, sectionName;
 
-    // Apply filters using the looked-up names (or original IDs if lookup failed/not provided)
-    if (circleName) {
+        circleName = await validateAndGetGeoName(circleId, 'Circles', 'CircleID', 'CircleName');
+        // If circleName is null, validateAndGetGeoName would have thrown.
+
+        if (divisionId) {
+            divisionName = await validateAndGetGeoName(divisionId, 'Divisions', 'DivisionID', 'DivisionName', circleId, 'CircleID');
+        }
+        if (subdivisionId) {
+            subdivisionName = await validateAndGetGeoName(subdivisionId, 'Subdivisions', 'SubdivisionID', 'SubdivisionName', divisionId, 'DivisionID');
+        }
+        if (sectionId) {
+            sectionName = await validateAndGetGeoName(sectionId, 'Sections', 'SectionID', 'SectionName', subdivisionId, 'SubdivisionID');
+        }
+
+        const queryParams = [];
+        const whereClauses = [];
+
+        // Always add circle and year as they are required and validated above
         whereClauses.push(`circle = ?`);
         queryParams.push(circleName);
-    }
-    if (divisionName) {
-        whereClauses.push(`division = ?`);
-        queryParams.push(divisionName);
-    }
-    if (subdivisionName) {
-        whereClauses.push(`subdivision = ?`);
-        queryParams.push(subdivisionName);
-    }
-    if (sectionName) {
-        whereClauses.push(`section = ?`);
-        queryParams.push(sectionName);
-    }
-    if (year) { // Year is directly applicable as INT
         whereClauses.push(`year = ?`);
-        queryParams.push(year);
-    }
+        queryParams.push(parseInt(year));
 
-    let query = `
-        SELECT
-            ${labelKey} AS month_label, -- Renaming to avoid conflict with 'label' alias
-            year,
-            ${valueKey} AS value,
-            CONCAT(${labelKey}, ' ', year) AS label -- Concatenate for frontend label
-        FROM ${tableName}
-    `;
+        if (divisionName) {
+            whereClauses.push(`division = ?`);
+            queryParams.push(divisionName);
+        }
+        if (subdivisionName) {
+            whereClauses.push(`subdivision = ?`);
+            queryParams.push(subdivisionName);
+        }
+        if (sectionName) {
+            whereClauses.push(`section = ?`);
+            queryParams.push(sectionName);
+        }
 
-    if (whereClauses.length > 0) {
-        query += ` WHERE ${whereClauses.join(' AND ')}`;
-    }
+        let query = `
+            SELECT
+                ${labelKey} AS month_or_section_label, 
+                year,
+                ${valueKey} AS value,
+                -- Dynamic CONCAT based on labelKey
+                CASE
+                    WHEN '${labelKey}' = 'section' THEN ${labelKey} 
+                    ELSE CONCAT(${labelKey}, ' ', year) 
+                END AS label 
+            FROM ${tableName}
+        `;
 
-    query += ` ORDER BY year, ${labelKey};`; // Assuming month-like labels can be ordered lexicographically with year for proper sorting
+        if (whereClauses.length > 0) {
+            query += ` WHERE ${whereClauses.join(' AND ')}`;
+        }
 
-    try {
+        query += ` ORDER BY year, month_or_section_label;`; 
+
         const [rows] = await mysqlPool.query(query, queryParams);
         const formatted = rows.map(row => ({
-            label: row.label, // Use the concatenated label
+            label: row.label,
             value: row.value
         }));
-        res.json(formatted); // REMOVED: { data: ... } wrapper
+        res.json(formatted);
+
     } catch (err) {
         console.error(`Error fetching KPI ${tableName}:`, err);
+        // Distinguish between validation errors (400) and internal server errors (500)
+        if (err.message.startsWith('Invalid ID format') || err.message.startsWith('Invalid CircleID') ||
+            err.message.startsWith('Invalid DivisionID') || err.message.startsWith('Invalid SubdivisionID') ||
+            err.message.startsWith('Invalid SectionID') || err.message.includes('required')) {
+            return res.status(400).json({ error: err.message });
+        }
         res.status(500).json({ error: `Failed to fetch KPI: ${tableName}` });
     }
 };
 
 // All existing KPI endpoints will now use the modified fetchKPI
-// labelKey for month-based KPIs should be 'month'
 app.get('/api/kpi/billing-efficiency', fetchKPI('billing_efficiency', 'month', 'value'));
 app.get('/api/kpi/revenue-collection-efficiency', fetchKPI('revenue_collection_efficiency', 'month', 'value'));
 app.get('/api/kpi/avg-billing-per-consumer', fetchKPI('avg_billing_per_consumer', 'month', 'value'));
@@ -217,53 +265,59 @@ app.get('/api/kpi/billing-coverage', fetchKPI('billing_coverage', 'month', 'valu
 // Custom endpoints for special tables (disputed_bills, metering_status)
 // These do NOT have geographical filters. Only year filter applies.
 app.get('/api/kpi/disputed-bills', async (req, res) => {
-    const { year: filterYear } = req.query; // Only year filter applies
-
-    let query = `SELECT month, year, total, disputed FROM disputed_bills`;
-    const queryParams = [];
-    const whereClauses = [];
-
-    if (filterYear) {
-        whereClauses.push(`year = ?`);
-        queryParams.push(filterYear);
-    }
-
-    if (whereClauses.length > 0) {
-        query += ` WHERE ${whereClauses.join(' AND ')}`;
-    }
-    query += ` ORDER BY year, month;`; // Order by year and month
+    const { year: filterYear } = req.query;
 
     try {
-        const [rows] = await mysqlPool.query(query, queryParams);
-        res.json(rows); // REMOVED: { data: ... } wrapper
+        if (!filterYear) {
+            return res.status(400).json({ error: 'year is required for disputed-bills KPI.' });
+        }
+        if (isNaN(parseInt(filterYear)) || String(parseInt(filterYear)) !== String(filterYear)) {
+            return res.status(400).json({ error: `Invalid year format: ${filterYear}. Must be an integer.` });
+        }
+
+        let query = `SELECT month, year, total, disputed FROM disputed_bills WHERE year = ? ORDER BY year, month;`;
+        const [rows] = await mysqlPool.query(query, [parseInt(filterYear)]);
+        
+        // Convert to label/value format
+        const formatted = rows.map(row => ({
+            label: `${row.month} ${row.year}`, // Example: "January 2024" or "1 2024"
+            value: row.total // Or whatever primary value you want for this KPI's main chart
+        }));
+        res.json(formatted);
     } catch (err) {
         console.error('Error fetching KPI disputed_bills:', err);
+        if (err.message.startsWith('Invalid year format')) {
+            return res.status(400).json({ error: err.message });
+        }
         res.status(500).json({ error: 'Failed to fetch KPI: disputed_bills' });
     }
 });
 
 app.get('/api/kpi/metering-status', async (req, res) => {
-    const { year: filterYear } = req.query; // Only year filter applies
-
-    let query = `SELECT month, year, metered, unmetered FROM metering_status`;
-    const queryParams = [];
-    const whereClauses = [];
-
-    if (filterYear) {
-        whereClauses.push(`year = ?`);
-        queryParams.push(filterYear);
-    }
-
-    if (whereClauses.length > 0) {
-        query += ` WHERE ${whereClauses.join(' AND ')}`;
-    }
-    query += ` ORDER BY year, month;`; // Order by year and month
+    const { year: filterYear } = req.query;
 
     try {
-        const [rows] = await mysqlPool.query(query, queryParams);
-        res.json(rows); // REMOVED: { data: ... } wrapper
+        if (!filterYear) {
+            return res.status(400).json({ error: 'year is required for metering-status KPI.' });
+        }
+        if (isNaN(parseInt(filterYear)) || String(parseInt(filterYear)) !== String(filterYear)) {
+            return res.status(400).json({ error: `Invalid year format: ${filterYear}. Must be an integer.` });
+        }
+
+        let query = `SELECT month, year, metered, unmetered FROM metering_status WHERE year = ? ORDER BY year, month;`;
+        const [rows] = await mysqlPool.query(query, [parseInt(filterYear)]);
+        
+        // Convert to label/value format
+        const formatted = rows.map(row => ({
+            label: `${row.month} ${row.year}`, // Example: "January 2024" or "1 2024"
+            value: row.metered // Or whatever primary value you want for this KPI's main chart
+        }));
+        res.json(formatted);
     } catch (err) {
         console.error('Error fetching KPI metering_status:', err);
+        if (err.message.startsWith('Invalid year format')) {
+            return res.status(400).json({ error: err.message });
+        }
         res.status(500).json({ error: 'Failed to fetch KPI: metering_status' });
     }
 });
