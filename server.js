@@ -30,9 +30,11 @@ app.use((req, res, next) => {
     next();
 });
 
-// --- Helper for ID validation and existence checking ---
-const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId, parentIdCol) => {
-    if (id === undefined) return null; // Not provided, not an error
+// --- Helper for ID validation and existence checking (Slightly refined) ---
+const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId = null, parentIdCol = null) => {
+    if (id === undefined || id === null) {
+        return null; // Not provided, not an error for optional filters
+    }
 
     // 1. Validate if it's an integer
     if (isNaN(parseInt(id)) || String(parseInt(id)) !== String(id)) {
@@ -44,7 +46,7 @@ const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId, pa
     const params = [parsedId];
 
     // 2. Validate hierarchy if parentId is provided
-    if (parentId !== undefined && parentId !== null) {
+    if (parentId !== null) {
         if (isNaN(parseInt(parentId)) || String(parseInt(parentId)) !== String(parentId)) {
             throw new Error(`Invalid parent ID format for ${parentIdCol}: ${parentId}. Must be an integer.`);
         }
@@ -56,7 +58,7 @@ const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId, pa
 
     // 3. Check if ID exists and belongs to hierarchy
     if (rows.length === 0) {
-        if (parentId !== undefined && parentId !== null) {
+        if (parentId !== null) {
             throw new Error(`Invalid ${idCol}: ${id} does not exist or does not belong to ${parentIdCol}: ${parentId}.`);
         } else {
             throw new Error(`Invalid ${idCol}: ${id} does not exist.`);
@@ -74,18 +76,20 @@ app.get('/api/filters/circles', async (req, res) => {
         res.json(rows);
     } catch (err) {
         console.error('Error fetching circles:', err);
-        res.status(500).json({ error: 'Failed to fetch circles' });
+        // It's good to log the actual error for debugging
+        res.status(500).json({ error: 'Failed to fetch circles', details: err.message });
     }
 });
 
 app.get('/api/filters/divisions', async (req, res) => {
     const { circleId } = req.query;
     try {
-        const circleName = await validateAndGetGeoName(circleId, 'Circles', 'CircleID', 'CircleName'); // Check circleId exists
-        if (!circleName) { // Means circleId was missing or invalid
-            return res.status(400).json({ error: 'circleId is required and must be valid' });
+        // Validate and ensure circleId exists without necessarily getting its name
+        if (circleId === undefined || circleId === null) {
+            return res.status(400).json({ error: 'circleId is required.' });
         }
-        
+        await validateAndGetGeoName(circleId, 'Circles', 'CircleID', 'CircleName'); // Just for existence check
+
         const [rows] = await mysqlPool.query(
             `SELECT DivisionID AS id, DivisionName AS name, CircleID FROM Divisions WHERE CircleID = ? ORDER BY DivisionName;`,
             [circleId]
@@ -93,20 +97,20 @@ app.get('/api/filters/divisions', async (req, res) => {
         res.json(rows);
     } catch (err) {
         console.error('Error fetching divisions:', err);
-        if (err.message.startsWith('Invalid ID format') || err.message.startsWith('Invalid CircleID')) {
-             return res.status(400).json({ error: err.message });
+        if (err.message.startsWith('Invalid ID format') || err.message.includes('does not exist')) {
+            return res.status(400).json({ error: err.message });
         }
-        res.status(500).json({ error: 'Failed to fetch divisions' });
+        res.status(500).json({ error: 'Failed to fetch divisions', details: err.message });
     }
 });
 
 app.get('/api/filters/subdivisions', async (req, res) => {
     const { divisionId } = req.query;
     try {
-        const divisionName = await validateAndGetGeoName(divisionId, 'Divisions', 'DivisionID', 'DivisionName'); // Check divisionId exists
-        if (!divisionName) { // Means divisionId was missing or invalid
-            return res.status(400).json({ error: 'divisionId is required and must be valid' });
+        if (divisionId === undefined || divisionId === null) {
+            return res.status(400).json({ error: 'divisionId is required.' });
         }
+        await validateAndGetGeoName(divisionId, 'Divisions', 'DivisionID', 'DivisionName'); // Just for existence check
 
         const [rows] = await mysqlPool.query(
             `SELECT SubdivisionID AS id, SubdivisionName AS name, DivisionID FROM Subdivisions WHERE DivisionID = ? ORDER BY SubdivisionName;`,
@@ -115,21 +119,21 @@ app.get('/api/filters/subdivisions', async (req, res) => {
         res.json(rows);
     } catch (err) {
         console.error('Error fetching subdivisions:', err);
-        if (err.message.startsWith('Invalid ID format') || err.message.startsWith('Invalid DivisionID')) {
+        if (err.message.startsWith('Invalid ID format') || err.message.includes('does not exist')) {
             return res.status(400).json({ error: err.message });
         }
-        res.status(500).json({ error: 'Failed to fetch subdivisions' });
+        res.status(500).json({ error: 'Failed to fetch subdivisions', details: err.message });
     }
 });
 
 app.get('/api/filters/sections', async (req, res) => {
     const { subdivisionId } = req.query;
     try {
-        const subdivisionName = await validateAndGetGeoName(subdivisionId, 'Subdivisions', 'SubdivisionID', 'SubdivisionName'); // Check subdivisionId exists
-        if (!subdivisionName) { // Means subdivisionId was missing or invalid
-            return res.status(400).json({ error: 'subdivisionId is required and must be valid' });
+        if (subdivisionId === undefined || subdivisionId === null) {
+            return res.status(400).json({ error: 'subdivisionId is required.' });
         }
-        
+        await validateAndGetGeoName(subdivisionId, 'Subdivisions', 'SubdivisionID', 'SubdivisionName'); // Just for existence check
+
         const [rows] = await mysqlPool.query(
             `SELECT SectionID AS id, SectionName AS name, SubdivisionID FROM Sections WHERE SubdivisionID = ? ORDER BY SectionName;`,
             [subdivisionId]
@@ -137,10 +141,10 @@ app.get('/api/filters/sections', async (req, res) => {
         res.json(rows);
     } catch (err) {
         console.error('Error fetching sections:', err);
-        if (err.message.startsWith('Invalid ID format') || err.message.startsWith('Invalid SubdivisionID')) {
+        if (err.message.startsWith('Invalid ID format') || err.message.includes('does not exist')) {
             return res.status(400).json({ error: err.message });
         }
-        res.status(500).json({ error: 'Failed to fetch sections' });
+        res.status(500).json({ error: 'Failed to fetch sections', details: err.message });
     }
 });
 
