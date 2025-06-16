@@ -50,7 +50,7 @@ const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId = n
     return rows[0][nameCol];
 };
 
-// Filter endpoints
+// --- Filter endpoints ---
 app.get('/api/filters/circles', async (req, res) => {
     try {
         const [rows] = await mysqlPool.query(`SELECT CircleID AS id, CircleName AS name FROM Circles ORDER BY CircleName;`);
@@ -100,14 +100,55 @@ app.get('/api/filters/sections', async (req, res) => {
     }
 });
 
+// Define the list of KPI tables to query for years.
+// It is crucial that all tables listed here *actually* have a 'Year' column.
+const KPI_TABLES = [
+    'BillingCollectionSummary',
+    'ArrearAgingKPI',
+    'ConsumptionAnomalyKPI',
+    'DisconnectionReconnectionKPI',
+    'DTHealthKPI',
+    'BreakdownRestorationKPI',
+    'ConnectionProgressKPI',
+    'FeederOutageKPI',
+    'ATCLossKPI',
+    'GeoPerformanceSnapshot',
+    'billing_efficiency',
+    'revenue_collection_efficiency',
+    'avg_billing_per_consumer',
+    'billing_rate',
+    'collection_rate',
+    'unbilled_consumers',
+    'arrear_ratio',
+    'billing_coverage'
+];
+
 app.get('/api/filters/years', async (req, res) => {
     try {
-        const [rows] = await mysqlPool.query(`SELECT DISTINCT Year FROM BillingCollectionSummary ORDER BY Year DESC;`);
-        const years = rows.map(r => String(r.Year));
+        // Construct UNION queries, assuming 'Year' column exists in all listed tables.
+        // SQL will throw an error if a column doesn't exist, which will be caught below.
+        const unionQueries = KPI_TABLES.map(table => `SELECT DISTINCT Year FROM ${table}`);
+        const fullQuery = unionQueries.join(' UNION ALL '); // Using UNION ALL for potential minor performance gain, then DISTINCT at the end
+        const finalQuery = `SELECT DISTINCT Year FROM (${fullQuery}) AS CombinedYears ORDER BY Year DESC;`;
+
+        const [rows] = await mysqlPool.query(finalQuery);
+        const years = rows.map(r => String(r.Year)); // Ensure years are strings
         res.json(years);
     } catch (err) {
-        console.error('Error fetching years:', err);
-        res.status(500).json({ error: 'Failed to fetch years' });
+        console.error('Error fetching years from all KPI tables:', err);
+        // Specifically check for "Unknown column 'Year'" type errors or similar
+        if (err.code === 'ER_BAD_FIELD_ERROR' || err.message.includes("Unknown column 'Year'")) {
+            res.status(500).json({
+                error: "Database schema mismatch: 'Year' column missing in one or more KPI tables.",
+                details: err.message,
+                tablesChecked: KPI_TABLES
+            });
+        } else {
+            res.status(500).json({
+                error: 'Failed to fetch years from all sources',
+                details: err.message
+            });
+        }
     }
 });
 
@@ -119,9 +160,25 @@ const fetchKPI = (table, columns) => async (req, res) => {
         const where = ['Year = ?'];
         const params = [parseInt(year)];
 
+        // Validate and apply geographical filters
         for (const key of ['CircleID', 'DivisionID', 'SubdivisionID', 'SectionID']) {
             if (filters[key]) {
-                await validateAndGetGeoName(filters[key], key.replace('ID', 's'), key, key.replace('ID', 'Name'));
+                // Determine the correct table name for validation
+                let validationTable = '';
+                switch(key) {
+                    case 'CircleID': validationTable = 'Circles'; break;
+                    case 'DivisionID': validationTable = 'Divisions'; break;
+                    case 'SubdivisionID': validationTable = 'Subdivisions'; break;
+                    case 'SectionID': validationTable = 'Sections'; break;
+                    default: break; // Should not happen
+                }
+
+                // Pass parent IDs for hierarchical validation
+                const parentId = key === 'DivisionID' ? circleId : (key === 'SubdivisionID' ? divisionId : (key === 'SectionID' ? subdivisionId : null));
+                const parentIdCol = key === 'DivisionID' ? 'CircleID' : (key === 'SubdivisionID' ? 'DivisionID' : (key === 'SectionID' ? 'SubdivisionID' : null));
+
+                await validateAndGetGeoName(filters[key], validationTable, key, key.replace('ID', 'Name'), parentId, parentIdCol);
+
                 where.push(`${key} = ?`);
                 params.push(filters[key]);
             }
@@ -132,7 +189,12 @@ const fetchKPI = (table, columns) => async (req, res) => {
         res.json(rows);
     } catch (err) {
         console.error(`Error fetching KPI ${table}:`, err);
-        res.status(400).json({ error: err.message });
+        // Provide more specific error details if from validateAndGetGeoName
+        if (err.message.startsWith('Invalid ID format') || err.message.startsWith('Invalid')) {
+            res.status(400).json({ error: err.message });
+        } else {
+            res.status(500).json({ error: `Failed to fetch KPI data for ${table}`, details: err.message });
+        }
     }
 };
 
