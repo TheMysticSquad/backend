@@ -1,0 +1,29 @@
+# .github/workflows/deploy_to_render.yml
+name: Deploy to Render on Push
+
+on:
+  push:
+    branches:
+      - main # Replace 'main' with your actual primary branch (e.g., master, dev, production)
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest # The operating system for the job
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4 # Action to check out your repository code
+
+      # You can add optional steps here, such as:
+      # - name: Set up Node.js
+      #   uses: actions/setup-node@v4
+      #   with:
+      #     node-version: '20' # Specify your Node.js version
+      # - name: Install dependencies
+      #   run: npm install
+      # - name: Run tests
+      #   run: npm test # It's good practice to run tests before deploying
+
+      - name: Trigger Render Deploy Hook
+        # This step uses the 'curl' command to hit your Render deploy hook
+        run: curl -X POST "${{ secrets.RENDER_DEPLOY_HOOK_URL }}"
+        # The ${{ secrets.RENDER_DEPLOY_HOOK_URL }} refers to the secret you created in GitHub
