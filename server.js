@@ -50,7 +50,7 @@ const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId = n
     return rows[0][nameCol];
 };
 
-// --- Filter endpoints ---
+// --- Filter endpoints (unchanged) ---
 app.get('/api/filters/circles', async (req, res) => {
     try {
         const [rows] = await mysqlPool.query(`SELECT CircleID AS id, CircleName AS name FROM Circles ORDER BY CircleName;`);
@@ -100,8 +100,7 @@ app.get('/api/filters/sections', async (req, res) => {
     }
 });
 
-// Define the list of KPI tables to query for years.
-// It is crucial that all tables listed here *actually* have a 'Year' column.
+// --- Year filter from KPI tables ---
 const KPI_TABLES = [
     'BillingCollectionSummary',
     'ArrearAgingKPI',
@@ -125,80 +124,49 @@ const KPI_TABLES = [
 
 app.get('/api/filters/years', async (req, res) => {
     try {
-        // Construct UNION queries, assuming 'Year' column exists in all listed tables.
-        // SQL will throw an error if a column doesn't exist, which will be caught below.
         const unionQueries = KPI_TABLES.map(table => `SELECT DISTINCT Year FROM ${table}`);
-        const fullQuery = unionQueries.join(' UNION ALL '); // Using UNION ALL for potential minor performance gain, then DISTINCT at the end
+        const fullQuery = unionQueries.join(' UNION ALL ');
         const finalQuery = `SELECT DISTINCT Year FROM (${fullQuery}) AS CombinedYears ORDER BY Year DESC;`;
-
         const [rows] = await mysqlPool.query(finalQuery);
-        const years = rows.map(r => String(r.Year)); // Ensure years are strings
-        res.json(years);
+        res.json(rows.map(r => String(r.Year)));
     } catch (err) {
-        console.error('Error fetching years from all KPI tables:', err);
-        // Specifically check for "Unknown column 'Year'" type errors or similar
-        if (err.code === 'ER_BAD_FIELD_ERROR' || err.message.includes("Unknown column 'Year'")) {
-            res.status(500).json({
-                error: "Database schema mismatch: 'Year' column missing in one or more KPI tables.",
-                details: err.message,
-                tablesChecked: KPI_TABLES
-            });
-        } else {
-            res.status(500).json({
-                error: 'Failed to fetch years from all sources',
-                details: err.message
-            });
-        }
+        console.error('Error fetching years:', err);
+        res.status(500).json({
+            error: "Database schema mismatch: 'Year' column missing in one or more KPI tables.",
+            details: err.message,
+            tablesChecked: KPI_TABLES
+        });
     }
 });
 
+// --- Updated fetchKPI function ---
 const fetchKPI = (table, columns) => async (req, res) => {
-    const { circleId, divisionId, subdivisionId, sectionId, year } = req.query;
+    const { sectionId, year } = req.query;
+
     try {
-        if (!circleId || !year) return res.status(400).json({ error: 'circleId and year are required.' });
-        const filters = { CircleID: circleId, DivisionID: divisionId, SubdivisionID: subdivisionId, SectionID: sectionId };
-        const where = ['Year = ?'];
-        const params = [parseInt(year)];
-
-        // Validate and apply geographical filters
-        for (const key of ['CircleID', 'DivisionID', 'SubdivisionID', 'SectionID']) {
-            if (filters[key]) {
-                // Determine the correct table name for validation
-                let validationTable = '';
-                switch(key) {
-                    case 'CircleID': validationTable = 'Circles'; break;
-                    case 'DivisionID': validationTable = 'Divisions'; break;
-                    case 'SubdivisionID': validationTable = 'Subdivisions'; break;
-                    case 'SectionID': validationTable = 'Sections'; break;
-                    default: break; // Should not happen
-                }
-
-                // Pass parent IDs for hierarchical validation
-                const parentId = key === 'DivisionID' ? circleId : (key === 'SubdivisionID' ? divisionId : (key === 'SectionID' ? subdivisionId : null));
-                const parentIdCol = key === 'DivisionID' ? 'CircleID' : (key === 'SubdivisionID' ? 'DivisionID' : (key === 'SectionID' ? 'SubdivisionID' : null));
-
-                await validateAndGetGeoName(filters[key], validationTable, key, key.replace('ID', 'Name'), parentId, parentIdCol);
-
-                where.push(`${key} = ?`);
-                params.push(filters[key]);
-            }
+        if (!sectionId || !year) {
+            return res.status(400).json({ error: 'Both sectionId and year are required.' });
         }
+
+        await validateAndGetGeoName(sectionId, 'Sections', 'SectionID', 'SectionName');
+
+        const where = ['Year = ?', 'SectionID = ?'];
+        const params = [parseInt(year), sectionId];
 
         const colSelect = columns.join(', ');
         const [rows] = await mysqlPool.query(`SELECT ${colSelect} FROM ${table} WHERE ${where.join(' AND ')}`, params);
         res.json(rows);
     } catch (err) {
-        console.error(`Error fetching KPI ${table}:`, err);
-        // Provide more specific error details if from validateAndGetGeoName
-        if (err.message.startsWith('Invalid ID format') || err.message.startsWith('Invalid')) {
+        console.error(`Error fetching KPI from ${table}:`, err);
+        if (err.message.startsWith('Invalid')) {
             res.status(400).json({ error: err.message });
         } else {
-            res.status(500).json({ error: `Failed to fetch KPI data for ${table}`, details: err.message });
+            res.status(500).json({ error: `Failed to fetch KPI data from ${table}`, details: err.message });
         }
     }
 };
 
-// Combined endpoints for all KPIs
+// --- KPI Endpoints (using updated fetchKPI) ---
 app.get('/api/kpi/arrear-aging', fetchKPI('ArrearAgingKPI', ['Year', 'TotalOutstanding', 'AgeBucket_0_30', 'AgeBucket_31_60', 'AgeBucket_61_90', 'AgeBucket_90_Plus', 'HighRiskConsumers']));
 app.get('/api/kpi/consumption-anomaly', fetchKPI('ConsumptionAnomalyKPI', ['Year', 'AvgMonthlyConsumption', 'ZeroUsageConsumers', 'SpikeCases', 'DropCases']));
 app.get('/api/kpi/disconnection-reconnection', fetchKPI('DisconnectionReconnectionKPI', ['Year', 'TotalDisconnections', 'TotalReconnections', 'AvgReconnectionTimeMinutes', 'TotalReconnectionCharges']));
@@ -209,7 +177,6 @@ app.get('/api/kpi/feeder-outage', fetchKPI('FeederOutageKPI', ['Year', 'SAIFI', 
 app.get('/api/kpi/atc-loss', fetchKPI('ATCLossKPI', ['Year', 'EnergyInput', 'UnitsBilled', 'UnitsPaid', 'ATCLossPercent', 'BillingEfficiency', 'CollectionEfficiency', 'FeederID']));
 app.get('/api/kpi/geo-performance', fetchKPI('GeoPerformanceSnapshot', ['Year', 'Latitude', 'Longitude', 'StatusType', 'StatusColor', 'EventType', 'EventCount']));
 
-// Add previous KPI endpoints
 app.get('/api/kpi/billing-efficiency', fetchKPI('billing_efficiency', ['Month', 'Year', 'Value']));
 app.get('/api/kpi/revenue-collection-efficiency', fetchKPI('revenue_collection_efficiency', ['Month', 'Year', 'Value']));
 app.get('/api/kpi/avg-billing-per-consumer', fetchKPI('avg_billing_per_consumer', ['Month', 'Year', 'Value']));
@@ -219,6 +186,7 @@ app.get('/api/kpi/unbilled-consumers', fetchKPI('unbilled_consumers', ['Month', 
 app.get('/api/kpi/arrear-ratio', fetchKPI('arrear_ratio', ['Month', 'Year', 'Percent']));
 app.get('/api/kpi/billing-coverage', fetchKPI('billing_coverage', ['Month', 'Year', 'Value']));
 
+// --- Start server ---
 app.listen(port, () => {
     console.log(`✅ Server running on http://localhost:${port}`);
 });
