@@ -148,24 +148,33 @@ const fetchKPI = (table, columns) => async (req, res) => {
             return res.status(400).json({ error: 'Both sectionId and year are required.' });
         }
 
-        // ✅ Use original column name 'SectionID' for validation only
+        // Use 'SectionID' for validation and querying
         await validateAndGetGeoName(sectionId, 'Sections', 'SectionID', 'SectionName');
 
-        const where = ['Year = ?', 'section_id = ?']; // ✅ 'section_id' used for KPI tables
+        // Use 'SectionID' in KPI table queries now
+        const where = ['Year = ?', 'SectionID = ?'];
         const params = [parseInt(year), sectionId];
 
         const colSelect = columns.join(', ');
-        const [rows] = await mysqlPool.query(`SELECT ${colSelect} FROM ${table} WHERE ${where.join(' AND ')}`, params);
+        const [rows] = await mysqlPool.query(
+            `SELECT ${colSelect} FROM ${table} WHERE ${where.join(' AND ')}`,
+            params
+        );
+
         res.json(rows);
     } catch (err) {
         console.error(`Error fetching KPI from ${table}:`, err);
         if (err.message.startsWith('Invalid')) {
             res.status(400).json({ error: err.message });
         } else {
-            res.status(500).json({ error: `Failed to fetch KPI data from ${table}`, details: err.message });
+            res.status(500).json({
+                error: `Failed to fetch KPI data from ${table}`,
+                details: err.message,
+            });
         }
     }
 };
+
 
 
 // --- KPI Endpoints (using updated fetchKPI) ---
