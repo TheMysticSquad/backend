@@ -148,11 +148,10 @@ const fetchKPI = (table, columns) => async (req, res) => {
             return res.status(400).json({ error: 'Both sectionId and year are required.' });
         }
 
-        // Validate using old schema (lookup tables)
+        // ✅ Use original column name 'SectionID' for validation only
         await validateAndGetGeoName(sectionId, 'Sections', 'SectionID', 'SectionName');
 
-        // Query KPI table using new schema
-        const where = ['Year = ?', 'section_id = ?'];
+        const where = ['Year = ?', 'section_id = ?']; // ✅ 'section_id' used for KPI tables
         const params = [parseInt(year), sectionId];
 
         const colSelect = columns.join(', ');
@@ -167,6 +166,7 @@ const fetchKPI = (table, columns) => async (req, res) => {
         }
     }
 };
+
 
 // --- KPI Endpoints (using updated fetchKPI) ---
 app.get('/api/kpi/arrear-aging', fetchKPI('ArrearAgingKPI', ['Year', 'TotalOutstanding', 'AgeBucket_0_30', 'AgeBucket_31_60', 'AgeBucket_61_90', 'AgeBucket_90_Plus', 'HighRiskConsumers']));
