@@ -23,12 +23,13 @@ const parseMysqlUrl = (mysqlUrl) => {
 
 const mysqlPool = mysql.createPool(parseMysqlUrl(process.env.DATABASE_URL));
 
+// Logging middleware
 app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.originalUrl}`);
     next();
 });
 
-// Validate function with query logging added
+// Validation utility
 const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId = null, parentIdCol = null) => {
     if (id === undefined || id === null) return null;
     if (isNaN(parseInt(id)) || String(parseInt(id)) !== String(id)) {
@@ -46,9 +47,6 @@ const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId = n
         params.push(parseInt(parentId));
     }
 
-    // Debug: log the exact query
-    console.log('Executing SQL:', query, params);
-
     const [rows] = await mysqlPool.query(query, params);
     if (rows.length === 0) {
         throw new Error(`Invalid ${idCol}: ${id} does not exist${parentId ? ` or does not belong to ${parentIdCol}: ${parentId}` : ''}.`);
@@ -62,7 +60,6 @@ app.get('/api/filters/circles', async (req, res) => {
         const [rows] = await mysqlPool.query(`SELECT CircleID AS id, CircleName AS name FROM Circles ORDER BY CircleName;`);
         res.json(rows);
     } catch (err) {
-        console.error('Error fetching circles:', err);
         res.status(500).json({ error: 'Failed to fetch circles', details: err.message });
     }
 });
@@ -75,7 +72,6 @@ app.get('/api/filters/divisions', async (req, res) => {
         const [rows] = await mysqlPool.query(`SELECT DivisionID AS id, DivisionName AS name FROM Divisions WHERE CircleID = ? ORDER BY DivisionName;`, [circleId]);
         res.json(rows);
     } catch (err) {
-        console.error('Error fetching divisions:', err);
         res.status(400).json({ error: err.message });
     }
 });
@@ -88,7 +84,6 @@ app.get('/api/filters/subdivisions', async (req, res) => {
         const [rows] = await mysqlPool.query(`SELECT SubdivisionID AS id, SubdivisionName AS name FROM Subdivisions WHERE DivisionID = ? ORDER BY SubdivisionName;`, [divisionId]);
         res.json(rows);
     } catch (err) {
-        console.error('Error fetching subdivisions:', err);
         res.status(400).json({ error: err.message });
     }
 });
@@ -101,31 +96,16 @@ app.get('/api/filters/sections', async (req, res) => {
         const [rows] = await mysqlPool.query(`SELECT SectionID AS id, SectionName AS name FROM Sections WHERE SubdivisionID = ? ORDER BY SectionName;`, [subdivisionId]);
         res.json(rows);
     } catch (err) {
-        console.error('Error fetching sections:', err);
         res.status(400).json({ error: err.message });
     }
 });
 
-// KPI year union
+// KPI year filter
 const KPI_TABLES = [
-    'BillingCollectionSummary',
-    'ArrearAgingKPI',
-    'ConsumptionAnomalyKPI',
-    'DisconnectionReconnectionKPI',
-    'DTHealthKPI',
-    'BreakdownRestorationKPI',
-    'ConnectionProgressKPI',
-    'FeederOutageKPI',
-    'ATCLossKPI',
-    'GeoPerformanceSnapshot',
-    'billing_efficiency',
-    'revenue_collection_efficiency',
-    'avg_billing_per_consumer',
-    'billing_rate',
-    'collection_rate',
-    'unbilled_consumers',
-    'arrear_ratio',
-    'billing_coverage'
+    'BillingCollectionSummary', 'ArrearAgingKPI', 'ConsumptionAnomalyKPI', 'DisconnectionReconnectionKPI',
+    'DTHealthKPI', 'BreakdownRestorationKPI', 'ConnectionProgressKPI', 'FeederOutageKPI', 'ATCLossKPI',
+    'GeoPerformanceSnapshot', 'billing_efficiency', 'revenue_collection_efficiency', 'avg_billing_per_consumer',
+    'billing_rate', 'collection_rate', 'unbilled_consumers', 'arrear_ratio', 'billing_coverage'
 ];
 
 app.get('/api/filters/years', async (req, res) => {
@@ -136,7 +116,6 @@ app.get('/api/filters/years', async (req, res) => {
         const [rows] = await mysqlPool.query(finalQuery);
         res.json(rows.map(r => String(r.Year)));
     } catch (err) {
-        console.error('Error fetching years:', err);
         res.status(500).json({
             error: "Database schema mismatch: 'Year' column missing in one or more KPI tables.",
             details: err.message,
@@ -145,7 +124,7 @@ app.get('/api/filters/years', async (req, res) => {
     }
 });
 
-// KPI data fetcher with correct SectionID
+// Generic KPI handler (for non-monthly tables)
 const fetchKPI = (table, columns) => async (req, res) => {
     const { sectionId, year } = req.query;
 
@@ -154,7 +133,6 @@ const fetchKPI = (table, columns) => async (req, res) => {
             return res.status(400).json({ error: 'Both sectionId and year are required.' });
         }
 
-        // Correct ID column usage
         await validateAndGetGeoName(sectionId, 'Sections', 'SectionID', 'SectionName');
 
         const where = ['Year = ?', 'SectionID = ?'];
@@ -168,19 +146,40 @@ const fetchKPI = (table, columns) => async (req, res) => {
 
         res.json(rows);
     } catch (err) {
-        console.error(`Error fetching KPI from ${table}:`, err);
-        if (err.message.startsWith('Invalid')) {
-            res.status(400).json({ error: err.message });
-        } else {
-            res.status(500).json({
-                error: `Failed to fetch KPI data from ${table}`,
-                details: err.message,
-            });
-        }
+        res.status(500).json({ error: `Failed to fetch KPI from ${table}`, details: err.message });
     }
 };
 
-// KPI endpoints
+// ✅ Unified monthly KPI handler
+const fetchMonthlyKPI = (table, valueCol) => async (req, res) => {
+    const { sectionId, year } = req.query;
+
+    try {
+        if (!sectionId || !year) {
+            return res.status(400).json({ error: 'Both sectionId and year are required.' });
+        }
+
+        await validateAndGetGeoName(sectionId, 'Sections', 'SectionID', 'SectionName');
+
+        const [rows] = await mysqlPool.query(
+            `SELECT Month, ${valueCol} AS value FROM ${table} WHERE Year = ? AND SectionID = ?`,
+            [parseInt(year), sectionId]
+        );
+
+        const formatted = rows.map(row => ({
+            label: row.Month,
+            value: row.value
+        }));
+
+        res.json(formatted);
+    } catch (err) {
+        res.status(500).json({ error: `Failed to fetch KPI from ${table}`, details: err.message });
+    }
+};
+
+// === KPI ROUTES ===
+
+// Year-only KPIs
 app.get('/api/kpi/arrear-aging', fetchKPI('ArrearAgingKPI', ['Year', 'TotalOutstanding', 'AgeBucket_0_30', 'AgeBucket_31_60', 'AgeBucket_61_90', 'AgeBucket_90_Plus', 'HighRiskConsumers']));
 app.get('/api/kpi/consumption-anomaly', fetchKPI('ConsumptionAnomalyKPI', ['Year', 'AvgMonthlyConsumption', 'ZeroUsageConsumers', 'SpikeCases', 'DropCases']));
 app.get('/api/kpi/disconnection-reconnection', fetchKPI('DisconnectionReconnectionKPI', ['Year', 'TotalDisconnections', 'TotalReconnections', 'AvgReconnectionTimeMinutes', 'TotalReconnectionCharges']));
@@ -191,16 +190,16 @@ app.get('/api/kpi/feeder-outage', fetchKPI('FeederOutageKPI', ['Year', 'SAIFI', 
 app.get('/api/kpi/atc-loss', fetchKPI('ATCLossKPI', ['Year', 'EnergyInput', 'UnitsBilled', 'UnitsPaid', 'ATCLossPercent', 'BillingEfficiency', 'CollectionEfficiency', 'FeederID']));
 app.get('/api/kpi/geo-performance', fetchKPI('GeoPerformanceSnapshot', ['Year', 'Latitude', 'Longitude', 'StatusType', 'StatusColor', 'EventType', 'EventCount']));
 
-app.get('/api/kpi/billing-efficiency', fetchKPI('billing_efficiency', ['Month', 'Year', 'Value']));
-app.get('/api/kpi/revenue-collection-efficiency', fetchKPI('revenue_collection_efficiency', ['Month', 'Year', 'Value']));
-app.get('/api/kpi/avg-billing-per-consumer', fetchKPI('avg_billing_per_consumer', ['Month', 'Year', 'Value']));
-app.get('/api/kpi/billing-rate', fetchKPI('billing_rate', ['Section', 'Year', 'Rate']));
-app.get('/api/kpi/collection-rate', fetchKPI('collection_rate', ['Month', 'Year', 'Value']));
-app.get('/api/kpi/unbilled-consumers', fetchKPI('unbilled_consumers', ['Month', 'Year', 'Percent']));
-app.get('/api/kpi/arrear-ratio', fetchKPI('arrear_ratio', ['Month', 'Year', 'Percent']));
-app.get('/api/kpi/billing-coverage', fetchKPI('billing_coverage', ['Month', 'Year', 'Value']));
+// ✅ Monthly KPI routes using unified handler
+app.get('/api/kpi/arrear-ratio', fetchMonthlyKPI('arrear_ratio', 'Percent'));
+app.get('/api/kpi/unbilled-consumers', fetchMonthlyKPI('unbilled_consumers', 'Percent'));
+app.get('/api/kpi/billing-efficiency', fetchMonthlyKPI('billing_efficiency', 'Value'));
+app.get('/api/kpi/revenue-collection-efficiency', fetchMonthlyKPI('revenue_collection_efficiency', 'Value'));
+app.get('/api/kpi/avg-billing-per-consumer', fetchMonthlyKPI('avg_billing_per_consumer', 'Value'));
+app.get('/api/kpi/collection-rate', fetchMonthlyKPI('collection_rate', 'Value'));
+app.get('/api/kpi/billing-coverage', fetchMonthlyKPI('billing_coverage', 'Value'));
 
-// Start server
+// Server start
 app.listen(port, () => {
     console.log(`✅ Server running on http://localhost:${port}`);
 });
