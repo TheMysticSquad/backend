@@ -28,6 +28,7 @@ app.use((req, res, next) => {
     next();
 });
 
+// Validate function with query logging added
 const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId = null, parentIdCol = null) => {
     if (id === undefined || id === null) return null;
     if (isNaN(parseInt(id)) || String(parseInt(id)) !== String(id)) {
@@ -36,6 +37,7 @@ const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId = n
     const parsedId = parseInt(id);
     let query = `SELECT ${nameCol} FROM ${tableName} WHERE ${idCol} = ?`;
     const params = [parsedId];
+
     if (parentId !== null) {
         if (isNaN(parseInt(parentId)) || String(parseInt(parentId)) !== String(parentId)) {
             throw new Error(`Invalid parent ID format for ${parentIdCol}: ${parentId}. Must be an integer.`);
@@ -43,6 +45,10 @@ const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId = n
         query += ` AND ${parentIdCol} = ?`;
         params.push(parseInt(parentId));
     }
+
+    // Debug: log the exact query
+    console.log('Executing SQL:', query, params);
+
     const [rows] = await mysqlPool.query(query, params);
     if (rows.length === 0) {
         throw new Error(`Invalid ${idCol}: ${id} does not exist${parentId ? ` or does not belong to ${parentIdCol}: ${parentId}` : ''}.`);
@@ -50,7 +56,7 @@ const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId = n
     return rows[0][nameCol];
 };
 
-// --- Filter endpoints (unchanged) ---
+// Filters
 app.get('/api/filters/circles', async (req, res) => {
     try {
         const [rows] = await mysqlPool.query(`SELECT CircleID AS id, CircleName AS name FROM Circles ORDER BY CircleName;`);
@@ -100,7 +106,7 @@ app.get('/api/filters/sections', async (req, res) => {
     }
 });
 
-// --- Year filter from KPI tables ---
+// KPI year union
 const KPI_TABLES = [
     'BillingCollectionSummary',
     'ArrearAgingKPI',
@@ -139,7 +145,7 @@ app.get('/api/filters/years', async (req, res) => {
     }
 });
 
-// --- Updated fetchKPI function ---
+// KPI data fetcher with correct SectionID
 const fetchKPI = (table, columns) => async (req, res) => {
     const { sectionId, year } = req.query;
 
@@ -148,10 +154,9 @@ const fetchKPI = (table, columns) => async (req, res) => {
             return res.status(400).json({ error: 'Both sectionId and year are required.' });
         }
 
-        // Use 'SectionID' for validation and querying
+        // Correct ID column usage
         await validateAndGetGeoName(sectionId, 'Sections', 'SectionID', 'SectionName');
 
-        // Use 'SectionID' in KPI table queries now
         const where = ['Year = ?', 'SectionID = ?'];
         const params = [parseInt(year), sectionId];
 
@@ -175,9 +180,7 @@ const fetchKPI = (table, columns) => async (req, res) => {
     }
 };
 
-
-
-// --- KPI Endpoints (using updated fetchKPI) ---
+// KPI endpoints
 app.get('/api/kpi/arrear-aging', fetchKPI('ArrearAgingKPI', ['Year', 'TotalOutstanding', 'AgeBucket_0_30', 'AgeBucket_31_60', 'AgeBucket_61_90', 'AgeBucket_90_Plus', 'HighRiskConsumers']));
 app.get('/api/kpi/consumption-anomaly', fetchKPI('ConsumptionAnomalyKPI', ['Year', 'AvgMonthlyConsumption', 'ZeroUsageConsumers', 'SpikeCases', 'DropCases']));
 app.get('/api/kpi/disconnection-reconnection', fetchKPI('DisconnectionReconnectionKPI', ['Year', 'TotalDisconnections', 'TotalReconnections', 'AvgReconnectionTimeMinutes', 'TotalReconnectionCharges']));
@@ -197,7 +200,7 @@ app.get('/api/kpi/unbilled-consumers', fetchKPI('unbilled_consumers', ['Month', 
 app.get('/api/kpi/arrear-ratio', fetchKPI('arrear_ratio', ['Month', 'Year', 'Percent']));
 app.get('/api/kpi/billing-coverage', fetchKPI('billing_coverage', ['Month', 'Year', 'Value']));
 
-// --- Start server ---
+// Start server
 app.listen(port, () => {
     console.log(`✅ Server running on http://localhost:${port}`);
 });
