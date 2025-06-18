@@ -148,9 +148,10 @@ const fetchKPI = (table, columns) => async (req, res) => {
             return res.status(400).json({ error: 'Both sectionId and year are required.' });
         }
 
-        // Use updated column name in KPI tables
-        await validateAndGetGeoName(sectionId, 'Sections', 'section_id', 'SectionName');
+        // Validate using old schema (lookup tables)
+        await validateAndGetGeoName(sectionId, 'Sections', 'SectionID', 'SectionName');
 
+        // Query KPI table using new schema
         const where = ['Year = ?', 'section_id = ?'];
         const params = [parseInt(year), sectionId];
 
