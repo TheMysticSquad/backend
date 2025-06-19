@@ -23,13 +23,11 @@ const parseMysqlUrl = (mysqlUrl) => {
 
 const mysqlPool = mysql.createPool(parseMysqlUrl(process.env.DATABASE_URL));
 
-// Logging middleware
 app.use((req, res, next) => {
     console.log(`${new Date().toISOString()} - ${req.method} ${req.originalUrl}`);
     next();
 });
 
-// Validation utility
 const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId = null, parentIdCol = null) => {
     if (id === undefined || id === null) return null;
     if (isNaN(parseInt(id)) || String(parseInt(id)) !== String(id)) {
@@ -54,7 +52,6 @@ const validateAndGetGeoName = async (id, tableName, idCol, nameCol, parentId = n
     return rows[0][nameCol];
 };
 
-// Filters
 app.get('/api/filters/circles', async (req, res) => {
     try {
         const [rows] = await mysqlPool.query(`SELECT CircleID AS id, CircleName AS name FROM Circles ORDER BY CircleName;`);
@@ -104,7 +101,7 @@ app.get('/api/filters/sections', async (req, res) => {
 const KPI_TABLES = [
     'BillingCollectionSummary', 'ArrearAgingKPI', 'ConsumptionAnomalyKPI', 'DisconnectionReconnectionKPI',
     'DTHealthKPI', 'BreakdownRestorationKPI', 'ConnectionProgressKPI', 'FeederOutageKPI', 'ATCLossKPI',
-    'GeoPerformanceSnapshot', 'billing_efficiency', 'revenue_collection_efficiency', 'avg_billing_per_consumer',
+    'billing_efficiency', 'revenue_collection_efficiency', 'avg_billing_per_consumer',
     'billing_rate', 'collection_rate', 'unbilled_consumers', 'arrear_ratio', 'billing_coverage'
 ];
 
@@ -124,40 +121,41 @@ app.get('/api/filters/years', async (req, res) => {
     }
 });
 
-// Generic KPI handler (for non-monthly tables)
-const fetchKPI = (table, columns) => async (req, res) => {
-    const { sectionId, year } = req.query;
+// === KPI HANDLERS ===
 
+// Utility to remove extra fields
+const cleanKpiResponse = (rows, fieldsToRemove = ['Year']) => {
+    return rows.map(row => {
+        const cleaned = { ...row };
+        fieldsToRemove.forEach(field => delete cleaned[field]);
+        return cleaned;
+    });
+};
+
+const fetchKPI = (table, columns, fieldsToRemove = ['Year']) => async (req, res) => {
+    const { sectionId, year } = req.query;
     try {
-        if (!sectionId || !year) {
-            return res.status(400).json({ error: 'Both sectionId and year are required.' });
-        }
+        if (!sectionId || !year) return res.status(400).json({ error: 'Both sectionId and year are required.' });
 
         await validateAndGetGeoName(sectionId, 'Sections', 'SectionID', 'SectionName');
 
-        const where = ['Year = ?', 'SectionID = ?'];
-        const params = [parseInt(year), sectionId];
-
         const colSelect = columns.join(', ');
         const [rows] = await mysqlPool.query(
-            `SELECT ${colSelect} FROM ${table} WHERE ${where.join(' AND ')}`,
-            params
+            `SELECT ${colSelect} FROM ${table} WHERE Year = ? AND SectionID = ?`,
+            [parseInt(year), sectionId]
         );
 
-        res.json(rows);
+        res.json(cleanKpiResponse(rows, fieldsToRemove));
     } catch (err) {
         res.status(500).json({ error: `Failed to fetch KPI from ${table}`, details: err.message });
     }
 };
 
-// ✅ Unified monthly KPI handler
 const fetchMonthlyKPI = (table, valueCol) => async (req, res) => {
     const { sectionId, year } = req.query;
 
     try {
-        if (!sectionId || !year) {
-            return res.status(400).json({ error: 'Both sectionId and year are required.' });
-        }
+        if (!sectionId || !year) return res.status(400).json({ error: 'Both sectionId and year are required.' });
 
         await validateAndGetGeoName(sectionId, 'Sections', 'SectionID', 'SectionName');
 
@@ -177,20 +175,22 @@ const fetchMonthlyKPI = (table, valueCol) => async (req, res) => {
     }
 };
 
-// === KPI ROUTES ===
-
-// Year-only KPIs
-app.get('/api/kpi/arrear-aging', fetchKPI('ArrearAgingKPI', ['Year', 'TotalOutstanding', 'AgeBucket_0_30', 'AgeBucket_31_60', 'AgeBucket_61_90', 'AgeBucket_90_Plus', 'HighRiskConsumers']));
-app.get('/api/kpi/consumption-anomaly', fetchKPI('ConsumptionAnomalyKPI', ['Year', 'AvgMonthlyConsumption', 'ZeroUsageConsumers', 'SpikeCases', 'DropCases']));
-app.get('/api/kpi/disconnection-reconnection', fetchKPI('DisconnectionReconnectionKPI', ['Year', 'TotalDisconnections', 'TotalReconnections', 'AvgReconnectionTimeMinutes', 'TotalReconnectionCharges']));
+// === KPI ROUTES (Updated) ===
 app.get('/api/kpi/dthealth', fetchKPI('DTHealthKPI', ['Year', 'TotalFailures', 'FailureRate', 'AvgRepairCost', 'AvgHealthIndex']));
 app.get('/api/kpi/breakdown-restoration', fetchKPI('BreakdownRestorationKPI', ['Year', 'TotalBreakdowns', 'AvgResponseTimeMinutes', 'RestorationWithin4HrsPercent']));
 app.get('/api/kpi/connection-progress', fetchKPI('ConnectionProgressKPI', ['Year', 'AvgApprovalTimeDays', 'PendingDisconnections', 'ConnectionCompletionRate']));
-app.get('/api/kpi/feeder-outage', fetchKPI('FeederOutageKPI', ['Year', 'SAIFI', 'SAIDI', 'CAIDI', 'FeederID', 'SubstationID']));
-app.get('/api/kpi/atc-loss', fetchKPI('ATCLossKPI', ['Year', 'EnergyInput', 'UnitsBilled', 'UnitsPaid', 'ATCLossPercent', 'BillingEfficiency', 'CollectionEfficiency', 'FeederID']));
-app.get('/api/kpi/geo-performance', fetchKPI('GeoPerformanceSnapshot', ['Year', 'Latitude', 'Longitude', 'StatusType', 'StatusColor', 'EventType', 'EventCount']));
+app.get('/api/kpi/feeder-outage', fetchKPI(
+    'FeederOutageKPI',
+    ['Year', 'SAIFI', 'SAIDI', 'CAIDI', 'FeederID', 'SubstationID'],
+    ['Year', 'FeederID', 'SubstationID']
+));
+app.get('/api/kpi/atc-loss', fetchKPI(
+    'ATCLossKPI',
+    ['Year', 'EnergyInput', 'UnitsBilled', 'UnitsPaid', 'ATCLossPercent', 'BillingEfficiency', 'CollectionEfficiency', 'FeederID'],
+    ['Year', 'FeederID']
+));
 
-// ✅ Monthly KPI routes using unified handler
+// === Monthly KPIs (unchanged) ===
 app.get('/api/kpi/arrear-ratio', fetchMonthlyKPI('arrear_ratio', 'Percent'));
 app.get('/api/kpi/unbilled-consumers', fetchMonthlyKPI('unbilled_consumers', 'Percent'));
 app.get('/api/kpi/billing-efficiency', fetchMonthlyKPI('billing_efficiency', 'Value'));
@@ -199,7 +199,8 @@ app.get('/api/kpi/avg-billing-per-consumer', fetchMonthlyKPI('avg_billing_per_co
 app.get('/api/kpi/collection-rate', fetchMonthlyKPI('collection_rate', 'Value'));
 app.get('/api/kpi/billing-coverage', fetchMonthlyKPI('billing_coverage', 'Value'));
 
-// Server start
+// ✅ Geo Performance removed
+
 app.listen(port, () => {
     console.log(`✅ Server running on http://localhost:${port}`);
 });
